@@ -18,7 +18,7 @@ from typing import Deque, Mapping, Optional, Tuple
 # the face, while the lower edge stays tight to avoid ordinary chin touches.
 HEAD_HORIZONTAL_SCALE = 2.0
 HEAD_UPPER_SCALE = 1.65
-HEAD_LOWER_SCALE = 0.85
+HEAD_LOWER_SCALE = 0.3
 # Reuse the last reliable head region during brief face/ear occlusion.
 HEAD_REGION_HOLD_SECONDS = 0.75
 # Increase these three values to reduce false positives; decrease them if a

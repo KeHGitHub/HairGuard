@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import argparse
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -17,7 +19,9 @@ from scratch_detector import DetectorResult, Landmark, ScratchDetector
 # Official MediaPipe lite model, stored locally so runtime inference is offline:
 # https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task
 MODEL_PATH = Path(__file__).with_name("pose_landmarker_lite.task")
+OVERLAY_PATH = Path(__file__).with_name("overlay.py")
 WINDOW_NAME = "HairGuard - press q to quit"
+OVERLAY_EXIT_GRACE_SECONDS = 0.25
 
 LANDMARK_INDEX = {
     "nose": 0,
@@ -218,7 +222,40 @@ def draw_debug(
         )
 
 
-def run() -> None:
+def launch_stop_overlay() -> subprocess.Popen:
+    """Start the overlay separately so its event loop cannot pause detection."""
+    if not OVERLAY_PATH.exists():
+        raise RuntimeError(f"Missing overlay helper: {OVERLAY_PATH}")
+    try:
+        return subprocess.Popen([sys.executable, str(OVERLAY_PATH)])
+    except OSError as error:
+        raise RuntimeError(f"Could not launch the STOP overlay: {error}") from error
+
+
+def close_overlay(process: subprocess.Popen) -> None:
+    """Close a running overlay helper and reap its process."""
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Local hand-to-hair scratch detector")
+    parser.add_argument(
+        "--mode",
+        choices=("test", "background"),
+        default="test",
+        help="test shows the debug preview; background hides it and shows STOP alerts",
+    )
+    return parser.parse_args()
+
+
+def run(mode: str = "test") -> None:
     if not MODEL_PATH.exists():
         raise RuntimeError(f"Missing pose model: {MODEL_PATH}")
 
@@ -237,11 +274,29 @@ def run() -> None:
     camera = open_camera()
     started = time.monotonic()
     previous_timestamp_ms = -1
+    overlay_process: Optional[subprocess.Popen] = None
+    overlay_hand: Optional[str] = None
+    hand_left_region_at: Optional[float] = None
 
-    print("HairGuard running. Press q in the preview window to quit.", flush=True)
+    if mode == "test":
+        print("HairGuard test mode. Press q in the preview window to quit.", flush=True)
+    else:
+        print("HairGuard background mode. Press Ctrl-C in this terminal to quit.", flush=True)
     try:
         with mp.tasks.vision.PoseLandmarker.create_from_options(options) as landmarker:
             while True:
+                if overlay_process is not None:
+                    overlay_status = overlay_process.poll()
+                    if overlay_status is not None:
+                        if overlay_status != 0:
+                            print(
+                                f"HairGuard warning: overlay exited with status {overlay_status}",
+                                file=sys.stderr,
+                            )
+                        overlay_process = None
+                        overlay_hand = None
+                        hand_left_region_at = None
+
                 ok, frame = camera.read()
                 if not ok:
                     raise RuntimeError("The camera stopped returning frames.")
@@ -259,21 +314,44 @@ def run() -> None:
                 landmarks = select_landmarks(pose)
                 result = detector.update(landmarks, timestamp)
 
+                if overlay_process is not None and overlay_hand is not None:
+                    active_hand_near = (
+                        result.left_near_head
+                        if overlay_hand == "left"
+                        else result.right_near_head
+                    )
+                    if active_hand_near:
+                        hand_left_region_at = None
+                    elif hand_left_region_at is None:
+                        hand_left_region_at = timestamp
+                    elif timestamp - hand_left_region_at >= OVERLAY_EXIT_GRACE_SECONDS:
+                        close_overlay(overlay_process)
+                        overlay_process = None
+                        overlay_hand = None
+                        hand_left_region_at = None
+
                 if result.scratch:
                     print("SCRATCH", flush=True)
+                    if mode == "background" and overlay_process is None:
+                        overlay_process = launch_stop_overlay()
+                        overlay_hand = result.active_hand
+                        hand_left_region_at = None
 
-                draw_debug(frame, landmarks, result)
-                cv2.imshow(WINDOW_NAME, frame)
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    break
+                if mode == "test":
+                    draw_debug(frame, landmarks, result)
+                    cv2.imshow(WINDOW_NAME, frame)
+                    if cv2.waitKey(1) & 0xFF == ord("q"):
+                        break
     finally:
+        if overlay_process is not None and overlay_process.poll() is None:
+            close_overlay(overlay_process)
         camera.release()
         cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
     try:
-        run()
+        run(parse_args().mode)
     except KeyboardInterrupt:
         pass
     except RuntimeError as error:

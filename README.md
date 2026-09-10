@@ -3,7 +3,7 @@
 HairGuard is a minimal macOS prototype that watches the built-in camera for
 repeated hand-to-head scratching.
 
-The current milestone:
+HairGuard currently:
 
 1. Captures the Mac camera with OpenCV.
 2. detects pose landmarks locally with MediaPipe.
@@ -11,9 +11,11 @@ The current milestone:
 4. rejects brief or stationary touches.
 5. prints `SCRATCH` after repeated wrist movement near the head.
 6. applies a cooldown to prevent repeated triggers.
+7. supports a debug test mode and a quiet background mode.
+8. shows a full-screen `STOP` warning in background mode.
 
-The screen-blocking overlay is intentionally **not implemented yet**. It should
-only be added after the detector has been tested and tuned with the live camera.
+The warning does not lock or freeze macOS. It remains visible until the detected
+hand leaves the head region or the user presses any key.
 
 ## Requirements
 
@@ -48,12 +50,12 @@ Enable access for the application launching Python, normally Terminal, iTerm,
 or Codex. Restart that application if macOS does not apply the change
 immediately.
 
-## Run
+## Run in test mode
 
 With the virtual environment active:
 
 ```bash
-python main.py
+python main.py --mode test
 ```
 
 Keep your head, shoulders, and hands visible. The preview displays:
@@ -74,6 +76,24 @@ SCRATCH
 
 Press `q` while the preview window is focused to quit. `Ctrl-C` in the terminal
 also stops the program.
+
+## Run in background mode
+
+```bash
+python main.py --mode background
+```
+
+Background mode keeps camera inference running without an OpenCV preview. When
+a scratch is detected, it prints `SCRATCH` and displays a full-screen `STOP`
+warning. The overlay runs in a separate process, so the camera and detector
+continue processing instead of freezing while the warning is visible.
+
+- Move the detected hand outside the head region to close the warning.
+- Press any key while the warning is focused to dismiss it.
+- Press `Ctrl-C` in the launching terminal at any time to stop HairGuard.
+
+The process still runs in the terminal; “background” means the camera preview is
+hidden. HairGuard intentionally does not install a daemon or login item.
 
 ## Detector states
 
@@ -117,7 +137,8 @@ Change one value at a time while watching `MOVE` and `REVERSALS` in the preview.
 
 ```text
 HairGuard/
-├── main.py                       Camera, pose inference, and preview
+├── main.py                       Camera, modes, preview, and STOP overlay
+├── overlay.py                    Non-blocking full-screen warning helper
 ├── scratch_detector.py           Portable scratching state machine
 ├── pose_landmarker_lite.task     Local MediaPipe pose model
 ├── requirements.txt              Pinned Python dependencies
@@ -131,4 +152,5 @@ HairGuard/
 - Head-region estimation works with real pose landmarks.
 - Synthetic checks confirm that stationary and brief touches do not trigger.
 - Repeated back-and-forth movement produces one event followed by cooldown.
-- Live camera verification still requires macOS camera permission on the host.
+- Live test-mode detection has been confirmed during tuning.
+- The full-screen overlay has been verified to appear and close automatically.
