@@ -56,12 +56,13 @@ With the virtual environment active:
 python main.py
 ```
 
-Keep your head, shoulders, and wrists visible. The preview displays:
+Keep your head, shoulders, and hands visible. The preview displays:
 
 - the relevant pose landmarks;
-- the estimated head/hair ellipse;
+- a thin ellipse for the raw head estimate;
+- the translucent, asymmetric region actually used for contact detection;
 - the detector state;
-- whether either wrist is near the head;
+- whether either hand is near the head;
 - accumulated movement and direction reversals; and
 - a visible scratch event indicator.
 
@@ -80,10 +81,11 @@ also stops the program.
 IDLE → POSSIBLE_SCRATCH → SCRATCHING → COOLDOWN → IDLE
 ```
 
-The detector follows one wrist after it enters the estimated head region. A
-trigger requires a minimum contact time, enough total movement, and several
-direction changes. Camera and UI code live in `main.py`; the reusable heuristic
-is isolated in `scratch_detector.py`.
+The detector uses the wrist, thumb, index, and pinky points to decide whether a
+hand touches the estimated head region. It then follows the wrist as the more
+stable motion signal. A trigger requires a minimum contact time, enough total
+movement, and several direction changes. Camera and UI code live in `main.py`;
+the reusable heuristic is isolated in `scratch_detector.py`.
 
 ## Tuning
 
@@ -91,15 +93,21 @@ The tuning constants are near the top of `scratch_detector.py`.
 
 If detection is too sensitive:
 
-- decrease `HEAD_PROXIMITY_SCALE`;
+- decrease `HEAD_HORIZONTAL_SCALE` to narrow the region horizontally;
+- decrease `HEAD_UPPER_SCALE` to shorten the hair region above the face;
+- decrease `HEAD_LOWER_SCALE` to reject more cheek/chin contact;
 - increase `MIN_CONTACT_SECONDS`;
 - increase `MIN_DIRECTION_REVERSALS`;
 - increase `MIN_TOTAL_TRAVEL` or `MIN_AXIS_RANGE`; or
 - increase `MIN_MOTION_STEP` to ignore more landmark jitter.
 
 If real scratches are missed, adjust those values in the opposite direction.
-If wrist landmarks disappear when the hand overlaps the head, slightly lower
-`MIN_LANDMARK_VISIBILITY`.
+`HEAD_REGION_HOLD_SECONDS` controls how long the last reliable head position is
+used when looking down or when the hand briefly hides facial landmarks. If hand
+landmarks disappear during contact, slightly lower `MIN_LANDMARK_VISIBILITY`.
+
+Hand points turn red when they are inside the actual detection boundary. This
+makes it clear which points can currently start or continue a scratch candidate.
 
 Increase `COOLDOWN_SECONDS` if separate alerts occur too close together.
 
@@ -124,4 +132,3 @@ HairGuard/
 - Synthetic checks confirm that stationary and brief touches do not trigger.
 - Repeated back-and-forth movement produces one event followed by cooldown.
 - Live camera verification still requires macOS camera permission on the host.
-

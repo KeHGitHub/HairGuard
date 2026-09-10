@@ -14,8 +14,13 @@ from typing import Deque, Mapping, Optional, Tuple
 
 
 # ---- Manual tuning knobs -------------------------------------------------
-# Make HEAD_PROXIMITY_SCALE larger if real scratches miss the head region.
-HEAD_PROXIMITY_SCALE = 1.15
+# The contact boundary is deliberately asymmetric: hair extends farther above
+# the face, while the lower edge stays tight to avoid ordinary chin touches.
+HEAD_HORIZONTAL_SCALE = 2.0
+HEAD_UPPER_SCALE = 1.65
+HEAD_LOWER_SCALE = 0.85
+# Reuse the last reliable head region during brief face/ear occlusion.
+HEAD_REGION_HOLD_SECONDS = 0.75
 # Increase these three values to reduce false positives; decrease them if a
 # real scratch is not detected.
 MIN_CONTACT_SECONDS = 1
@@ -49,21 +54,38 @@ class Landmark:
 
 @dataclass(frozen=True)
 class HeadRegion:
-    """Axis-aligned ellipse in normalized image coordinates."""
+    """Asymmetric head-contact region in normalized image coordinates."""
 
     center_x: float
     center_y: float
     radius_x: float
     radius_y: float
 
+    @property
+    def detection_radius_x(self) -> float:
+        return self.radius_x * HEAD_HORIZONTAL_SCALE
+
+    @property
+    def detection_radius_y_upper(self) -> float:
+        return self.radius_y * HEAD_UPPER_SCALE
+
+    @property
+    def detection_radius_y_lower(self) -> float:
+        return self.radius_y * HEAD_LOWER_SCALE
+
     def score(self, point: Landmark) -> float:
-        """Elliptical distance: <= 1 is inside the unexpanded ellipse."""
-        dx = (point.x - self.center_x) / self.radius_x
-        dy = (point.y - self.center_y) / self.radius_y
+        """Asymmetric elliptical distance; a score <= 1 is detectable contact."""
+        radius_y = (
+            self.detection_radius_y_upper
+            if point.y < self.center_y
+            else self.detection_radius_y_lower
+        )
+        dx = (point.x - self.center_x) / self.detection_radius_x
+        dy = (point.y - self.center_y) / radius_y
         return dx * dx + dy * dy
 
     def contains(self, point: Landmark) -> bool:
-        return self.score(point) <= HEAD_PROXIMITY_SCALE**2
+        return self.score(point) <= 1.0
 
 
 @dataclass(frozen=True)
@@ -84,9 +106,8 @@ def _visible(point: Optional[Landmark]) -> bool:
 
 def estimate_head_region(landmarks: Mapping[str, Landmark]) -> Optional[HeadRegion]:
     """Estimate a deliberately generous head/hair ellipse from pose landmarks."""
-    nose = landmarks.get("nose")
-    if not _visible(nose):
-        return None
+    nose_point = landmarks.get("nose")
+    nose = nose_point if _visible(nose_point) else None
 
     ears = [
         point
@@ -98,15 +119,20 @@ def estimate_head_region(landmarks: Mapping[str, Landmark]) -> Optional[HeadRegi
         for name in ("left_shoulder", "right_shoulder")
         if _visible(point := landmarks.get(name))
     ]
-    if not ears and not shoulders:
+    if nose is None and len(ears) < 2:
         return None
 
-    center_x = sum(point.x for point in ears) / len(ears) if len(ears) == 2 else nose.x
-    ear_y = sum(point.y for point in ears) / len(ears) if ears else nose.y
+    center_x = (
+        sum(point.x for point in ears) / len(ears)
+        if len(ears) == 2
+        else nose.x  # type: ignore[union-attr]
+    )
+    face_y = nose.y if nose is not None else sum(point.y for point in ears) / len(ears)
+    ear_y = sum(point.y for point in ears) / len(ears) if ears else face_y
 
     if len(ears) == 2:
         ear_span = hypot(ears[0].x - ears[1].x, ears[0].y - ears[1].y)
-    elif len(ears) == 1:
+    elif len(ears) == 1 and nose is not None:
         ear_span = 2.0 * hypot(ears[0].x - nose.x, ears[0].y - nose.y)
     else:
         ear_span = 0.0
@@ -119,12 +145,12 @@ def estimate_head_region(landmarks: Mapping[str, Landmark]) -> Optional[HeadRegi
     else:
         shoulder_span = 0.0
 
-    shoulder_y = sum(point.y for point in shoulders) / len(shoulders) if shoulders else nose.y
-    face_to_shoulders = max(0.0, shoulder_y - nose.y)
+    shoulder_y = sum(point.y for point in shoulders) / len(shoulders) if shoulders else face_y
+    face_to_shoulders = max(0.0, shoulder_y - face_y)
 
     radius_x = max(0.060, ear_span * 0.85, shoulder_span * 0.22)
     radius_y = max(0.080, radius_x * 1.25, face_to_shoulders * 0.55)
-    center_y = (nose.y + ear_y) * 0.5 - radius_y * 0.5
+    center_y = (face_y + ear_y) * 0.5 - radius_y * 0.5
     return HeadRegion(center_x, center_y, radius_x, radius_y)
 
 
@@ -137,9 +163,21 @@ class ScratchDetector:
         self._last_near = 0.0
         self._scratch_started = 0.0
         self._history: Deque[Tuple[float, float, float]] = deque()
+        self._last_head_region: Optional[HeadRegion] = None
+        self._last_head_region_time = 0.0
 
     def update(self, landmarks: Mapping[str, Landmark], timestamp: float) -> DetectorResult:
-        region = estimate_head_region(landmarks)
+        fresh_region = estimate_head_region(landmarks)
+        if fresh_region is not None:
+            self._last_head_region = fresh_region
+            self._last_head_region_time = timestamp
+        region = fresh_region
+        if (
+            region is None
+            and self._last_head_region is not None
+            and timestamp - self._last_head_region_time <= HEAD_REGION_HOLD_SECONDS
+        ):
+            region = self._last_head_region
         hands = {
             side: [
                 point

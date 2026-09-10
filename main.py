@@ -97,6 +97,48 @@ def draw_debug(
 ) -> None:
     height, width = frame.shape[:2]
 
+    if result.head_region is not None:
+        region = result.head_region
+        center = (int(region.center_x * width), int(region.center_y * height))
+        base_axes = (
+            max(1, int(region.radius_x * width)),
+            max(1, int(region.radius_y * height)),
+        )
+        detection_radius_x = max(1, int(region.detection_radius_x * width))
+        upper_axes = (
+            detection_radius_x,
+            max(1, int(region.detection_radius_y_upper * height)),
+        )
+        lower_axes = (
+            detection_radius_x,
+            max(1, int(region.detection_radius_y_lower * height)),
+        )
+
+        # Join two half-ellipses to draw the exact asymmetric contains() boundary.
+        lower_arc = cv2.ellipse2Poly(center, lower_axes, 0, 0, 180, 4)
+        upper_arc = cv2.ellipse2Poly(center, upper_axes, 0, 180, 360, 4)
+        detection_contour = np.vstack((lower_arc, upper_arc))
+        tint = frame.copy()
+        cv2.fillPoly(tint, [detection_contour], (255, 80, 200))
+        cv2.addWeighted(tint, 0.13, frame, 0.87, 0, frame)
+        cv2.polylines(frame, [detection_contour], True, (255, 80, 200), 2)
+
+        # The thin inner ellipse shows the raw head estimate before weighting.
+        cv2.ellipse(frame, center, base_axes, 0, 0, 360, (170, 90, 150), 1)
+        cv2.putText(
+            frame,
+            "ACTUAL SCRATCH DETECTION REGION",
+            (
+                max(8, center[0] - detection_radius_x),
+                max(18, center[1] - upper_axes[1] - 8),
+            ),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (255, 80, 200),
+            1,
+            cv2.LINE_AA,
+        )
+
     for first, second in (
         ("left_ear", "right_ear"),
         ("left_shoulder", "right_shoulder"),
@@ -120,7 +162,14 @@ def draw_debug(
         if point.visibility < 0.5:
             continue
         location = pixel(point, width, height)
-        cv2.circle(frame, location, 7, POINT_COLORS[name], -1)
+        hand_point = name.endswith(("wrist", "pinky", "index", "thumb"))
+        inside = bool(
+            hand_point
+            and result.head_region is not None
+            and result.head_region.contains(point)
+        )
+        color = (0, 0, 255) if inside else POINT_COLORS[name]
+        cv2.circle(frame, location, 9 if inside else 7, color, -1)
         label = name.replace("left_", "L ").replace("right_", "R ")
         cv2.putText(
             frame,
@@ -128,23 +177,7 @@ def draw_debug(
             (location[0] + 8, location[1] - 8),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.42,
-            POINT_COLORS[name],
-            1,
-            cv2.LINE_AA,
-        )
-
-    if result.head_region is not None:
-        region = result.head_region
-        center = (int(region.center_x * width), int(region.center_y * height))
-        axes = (int(region.radius_x * width), int(region.radius_y * height))
-        cv2.ellipse(frame, center, axes, 0, 0, 360, (255, 80, 200), 2)
-        cv2.putText(
-            frame,
-            "HEAD / HAIR REGION",
-            (center[0] - axes[0], center[1] - axes[1] - 8),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
-            (255, 80, 200),
+            color,
             1,
             cv2.LINE_AA,
         )
