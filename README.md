@@ -13,6 +13,7 @@ HairGuard currently:
 6. applies a cooldown to prevent repeated triggers.
 7. supports a debug test mode and a quiet background mode.
 8. shows a full-screen `STOP` warning in background mode.
+9. estimates pulse locally from subtle colour changes in two cheek regions.
 
 The warning does not lock or freeze macOS. It remains visible until the detected
 hand leaves the head region or the user presses any key.
@@ -65,7 +66,8 @@ Keep your head, shoulders, and hands visible. The preview displays:
 - the translucent, asymmetric region actually used for contact detection;
 - the detector state;
 - whether either hand is near the head;
-- accumulated movement and direction reversals; and
+- accumulated movement and direction reversals;
+- the two cheek regions sampled for rPPG and the current pulse status; and
 - a visible scratch event indicator.
 
 When a scratch is detected, the terminal prints:
@@ -98,9 +100,9 @@ hidden. HairGuard intentionally does not install a daemon or login item.
 ## Build a macOS app
 
 The local beta can be packaged as a double-clickable Apple Silicon macOS app.
-The app contains Python, MediaPipe, OpenCV, the pose model, and a small compiled
-overlay helper. Your friends do not need Python and do not receive separate
-source files.
+The app contains Python, MediaPipe, OpenCV, the pose model, and a small native
+menu-bar and alert helper. Your friends do not need Python and do not receive
+separate source files.
 
 Install the build tool once:
 
@@ -126,10 +128,38 @@ camera preview and displays the full-screen `STOP` warning when scratching is
 detected. The source command `python main.py` still defaults to test mode for
 development.
 
-The running app remains available from the Dock. To stop it, activate
-HairGuard and choose **HairGuard → Quit HairGuard**, press **Command-Q**, or
-choose **Quit** from its Dock menu. Quitting closes any active warning overlay
-and releases the camera cleanly.
+The running app appears as a waveform icon in the macOS menu bar, without a
+Dock icon or camera window. Click it to see:
+
+- the current pulse estimate;
+- the scratch detector state (`IDLE`, `POSSIBLE_SCRATCH`, `SCRATCHING`, or
+  `COOLDOWN`); and
+- **Quit HairGuard**.
+
+Quitting closes any active warning overlay and releases the camera cleanly.
+The pulse row displays a filtered rolling average. It shows `acquiring`,
+`stabilizing`, `low light`, or `low signal` when there is not enough reliable
+camera information.
+
+## Pulse estimation (rPPG)
+
+HairGuard samples average RGB values from two small cheek regions and retains
+only a rolling colour-signal window. It does not retain camera frames. A simple
+chrominance calculation reduces shared lighting changes, and a frequency
+analysis estimates the strongest pulse between 45 and 180 BPM. HairGuard then
+keeps a short history of those estimates, removes isolated outliers, weights
+the reliable estimates, and smoothly updates the displayed average. A brief
+signal-quality dip holds the last stable result instead of making the value
+jump or disappear immediately.
+
+For a cleaner reading, face the camera, remain reasonably still, and use steady
+front lighting. Motion, automatic camera exposure, shadows, makeup, and changing
+screen brightness can disturb the estimate. This is an experimental wellness
+signal and must not be used for diagnosis or medical decisions.
+
+There is one primary rPPG setting in `rppg.py`:
+`ANALYSIS_WINDOW_SECONDS`. A longer window produces a steadier but slower
+reading. The default is 10 seconds.
 
 This beta uses a free ad-hoc signature rather than a paid Apple Developer ID.
 After unzipping it, another user may need to Control-click `HairGuard.app`,
@@ -181,7 +211,10 @@ Change one value at a time while watching `MOVE` and `REVERSALS` in the preview.
 HairGuard/
 ├── main.py                       Camera, modes, preview, and STOP overlay
 ├── overlay.py                    Non-blocking full-screen warning helper
+├── rppg.py                       Local camera-based pulse estimator
+├── status_helper.swift           Native macOS status and alert helper
 ├── scratch_detector.py           Portable scratching state machine
+├── tests/test_rppg.py            Synthetic pulse-estimation checks
 ├── pose_landmarker_lite.task     Local MediaPipe pose model
 ├── requirements.txt              Pinned Python dependencies
 ├── requirements-build.txt        App packaging dependency

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import queue
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Dict, Iterable, Mapping, Optional, Tuple
@@ -13,6 +15,7 @@ import cv2
 import mediapipe as mp
 import numpy as np
 
+from rppg import RPPGMonitor, RPPGResult
 from scratch_detector import DetectorResult, Landmark, ScratchDetector
 
 
@@ -28,12 +31,14 @@ def bundled_path(filename: str) -> Path:
 # https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task
 MODEL_PATH = bundled_path("pose_landmarker_lite.task")
 OVERLAY_PATH = bundled_path("overlay.py")
-OVERLAY_HELPER_PATH = bundled_path("HairGuardOverlay")
+STATUS_HELPER_PATH = bundled_path("HairGuardStatus")
 WINDOW_NAME = "HairGuard - press q to quit"
 OVERLAY_EXIT_GRACE_SECONDS = 0.25
 
 LANDMARK_INDEX = {
     "nose": 0,
+    "left_eye": 2,
+    "right_eye": 5,
     "left_ear": 7,
     "right_ear": 8,
     "left_shoulder": 11,
@@ -50,6 +55,8 @@ LANDMARK_INDEX = {
 
 POINT_COLORS = {
     "nose": (0, 220, 255),
+    "left_eye": (0, 220, 255),
+    "right_eye": (0, 220, 255),
     "left_ear": (0, 220, 255),
     "right_ear": (0, 220, 255),
     "left_shoulder": (255, 180, 0),
@@ -65,52 +72,104 @@ POINT_COLORS = {
 }
 
 
-class BackgroundController:
-    """Keep a macOS application menu responsive while detection is hidden."""
+class MenuBarController:
+    """Exchange status and quit events with the tiny native menu-bar helper."""
 
     def __init__(self) -> None:
-        import tkinter as tk
-
-        self._tk = tk
-        self._quit_requested = False
-        self._root = tk.Tk(className="HairGuard")
-        self._root.title("HairGuard")
-        self._root.withdraw()
-
-        menu_bar = tk.Menu(self._root)
-        app_menu = tk.Menu(menu_bar, name="apple", tearoff=False)
-        app_menu.add_command(
-            label="Quit HairGuard",
-            accelerator="Command-Q",
-            command=self.request_quit,
-        )
-        menu_bar.add_cascade(label="HairGuard", menu=app_menu)
-        self._root.configure(menu=menu_bar)
-
-        self._root.bind_all("<Command-q>", self.request_quit)
-        self._root.createcommand("tk::mac::Quit", self.request_quit)
-        self._root.update_idletasks()
-        self._root.update()
-
-    def request_quit(self, _event: object = None) -> None:
-        self._quit_requested = True
-
-    def poll(self) -> bool:
-        """Process pending menu events and return False when quit is requested."""
-        if self._quit_requested:
-            return False
+        if not STATUS_HELPER_PATH.exists():
+            raise RuntimeError(f"Missing menu-bar helper: {STATUS_HELPER_PATH}")
         try:
-            self._root.update_idletasks()
-            self._root.update()
-        except self._tk.TclError:
-            self._quit_requested = True
-        return not self._quit_requested
+            self._process = subprocess.Popen(
+                [str(STATUS_HELPER_PATH)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+        except OSError as error:
+            raise RuntimeError(f"Could not launch the menu-bar helper: {error}") from error
+
+        if self._process.stdin is None or self._process.stdout is None:
+            self._process.terminate()
+            raise RuntimeError("Could not connect to the menu-bar helper.")
+
+        self._events: queue.Queue[str] = queue.Queue()
+        self._last_pulse = ""
+        self._last_state = ""
+        self.alert_visible = False
+        self._quit_requested = False
+        self._reader = threading.Thread(target=self._read_events, daemon=True)
+        self._reader.start()
+
+    def _read_events(self) -> None:
+        assert self._process.stdout is not None
+        for line in self._process.stdout:
+            self._events.put(line.strip())
+        self._events.put("EXIT")
+
+    def is_running(self) -> bool:
+        while True:
+            try:
+                event = self._events.get_nowait()
+            except queue.Empty:
+                break
+            if event in ("QUIT", "EXIT"):
+                self._quit_requested = True
+            elif event == "DISMISSED":
+                self.alert_visible = False
+        return not self._quit_requested and self._process.poll() is None
+
+    def update(self, pulse_status: str, detector_state: str) -> bool:
+        if pulse_status != self._last_pulse:
+            if not self._send("PULSE", pulse_status):
+                return False
+            self._last_pulse = pulse_status
+        if detector_state != self._last_state:
+            if not self._send("STATE", detector_state):
+                return False
+            self._last_state = detector_state
+        return self.is_running()
+
+    def show_alert(self) -> bool:
+        if self.alert_visible:
+            return True
+        if not self._send("ALERT", "SHOW"):
+            return False
+        self.alert_visible = True
+        return True
+
+    def hide_alert(self) -> None:
+        if not self.alert_visible:
+            return
+        self._send("ALERT", "HIDE")
+        self.alert_visible = False
+
+    def _send(self, name: str, value: str) -> bool:
+        assert self._process.stdin is not None
+        try:
+            self._process.stdin.write(f"{name}\t{value}\n")
+            self._process.stdin.flush()
+        except (BrokenPipeError, OSError):
+            return False
+        return True
 
     def close(self) -> None:
+        if self._process.stdin is not None:
+            try:
+                self._process.stdin.close()
+            except OSError:
+                pass
+        if self._process.poll() is not None:
+            return
         try:
-            self._root.destroy()
-        except self._tk.TclError:
-            pass
+            self._process.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            self._process.terminate()
+            try:
+                self._process.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                self._process.kill()
+                self._process.wait()
 
 
 def open_camera() -> cv2.VideoCapture:
@@ -155,6 +214,7 @@ def draw_debug(
     frame: np.ndarray,
     landmarks: Mapping[str, Landmark],
     result: DetectorResult,
+    pulse: RPPGResult,
 ) -> None:
     height, width = frame.shape[:2]
 
@@ -200,6 +260,9 @@ def draw_debug(
             cv2.LINE_AA,
         )
 
+    for x0, y0, x1, y1 in pulse.regions:
+        cv2.rectangle(frame, (x0, y0), (x1, y1), (70, 230, 230), 1)
+
     for first, second in (
         ("left_ear", "right_ear"),
         ("left_shoulder", "right_shoulder"),
@@ -243,9 +306,10 @@ def draw_debug(
             cv2.LINE_AA,
         )
 
-    cv2.rectangle(frame, (10, 10), (390, 142), (20, 20, 20), -1)
+    cv2.rectangle(frame, (10, 10), (390, 165), (20, 20, 20), -1)
     lines = (
         f"STATE: {result.state}",
+        f"PULSE: {pulse.status}",
         f"LEFT NEAR HEAD:  {'YES' if result.left_near_head else 'no'}",
         f"RIGHT NEAR HEAD: {'YES' if result.right_near_head else 'no'}",
         f"ACTIVE: {result.active_hand or '-'}   MOVE: {result.movement:.3f}",
@@ -280,15 +344,10 @@ def draw_debug(
 
 
 def launch_stop_overlay() -> subprocess.Popen:
-    """Start the overlay separately so its event loop cannot pause detection."""
-    if getattr(sys, "frozen", False):
-        if not OVERLAY_HELPER_PATH.exists():
-            raise RuntimeError(f"Missing overlay helper: {OVERLAY_HELPER_PATH}")
-        command = [str(OVERLAY_HELPER_PATH)]
-    else:
-        if not OVERLAY_PATH.exists():
-            raise RuntimeError(f"Missing overlay helper: {OVERLAY_PATH}")
-        command = [sys.executable, str(OVERLAY_PATH)]
+    """Start the source-mode overlay without pausing camera detection."""
+    if not OVERLAY_PATH.exists():
+        raise RuntimeError(f"Missing overlay helper: {OVERLAY_PATH}")
+    command = [sys.executable, str(OVERLAY_PATH)]
     try:
         return subprocess.Popen(command)
     except OSError as error:
@@ -338,14 +397,16 @@ def run(mode: str = "test") -> None:
         min_tracking_confidence=0.5,
     )
     detector = ScratchDetector()
+    pulse_monitor = RPPGMonitor()
     camera = open_camera()
     started = time.monotonic()
     previous_timestamp_ms = -1
     overlay_process: Optional[subprocess.Popen] = None
     overlay_hand: Optional[str] = None
     hand_left_region_at: Optional[float] = None
-    background_controller = (
-        BackgroundController()
+    last_pulse_printed_at = float("-inf")
+    menu_bar_controller = (
+        MenuBarController()
         if mode == "background" and getattr(sys, "frozen", False)
         else None
     )
@@ -357,7 +418,7 @@ def run(mode: str = "test") -> None:
     try:
         with mp.tasks.vision.PoseLandmarker.create_from_options(options) as landmarker:
             while True:
-                if background_controller is not None and not background_controller.poll():
+                if menu_bar_controller is not None and not menu_bar_controller.is_running():
                     break
 
                 if overlay_process is not None:
@@ -388,8 +449,29 @@ def run(mode: str = "test") -> None:
                 pose = pose_result.pose_landmarks[0] if pose_result.pose_landmarks else None
                 landmarks = select_landmarks(pose)
                 result = detector.update(landmarks, timestamp)
+                pulse_result = pulse_monitor.update(frame, landmarks, timestamp)
 
-                if overlay_process is not None and overlay_hand is not None:
+                if menu_bar_controller is not None:
+                    if not menu_bar_controller.update(pulse_result.status, result.state):
+                        break
+                    if overlay_hand is not None and not menu_bar_controller.alert_visible:
+                        # The user dismissed the native alert with a key.
+                        overlay_hand = None
+                        hand_left_region_at = None
+                elif (
+                    mode == "background"
+                    and pulse_result.bpm is not None
+                    and timestamp - last_pulse_printed_at >= 5.0
+                ):
+                    print(f"PULSE {pulse_result.bpm:.0f} BPM", flush=True)
+                    last_pulse_printed_at = timestamp
+
+                warning_visible = bool(
+                    menu_bar_controller.alert_visible
+                    if menu_bar_controller is not None
+                    else overlay_process is not None
+                )
+                if warning_visible and overlay_hand is not None:
                     active_hand_near = (
                         result.left_near_head
                         if overlay_hand == "left"
@@ -400,20 +482,29 @@ def run(mode: str = "test") -> None:
                     elif hand_left_region_at is None:
                         hand_left_region_at = timestamp
                     elif timestamp - hand_left_region_at >= OVERLAY_EXIT_GRACE_SECONDS:
-                        close_overlay(overlay_process)
-                        overlay_process = None
+                        if menu_bar_controller is not None:
+                            menu_bar_controller.hide_alert()
+                        elif overlay_process is not None:
+                            close_overlay(overlay_process)
+                            overlay_process = None
                         overlay_hand = None
                         hand_left_region_at = None
 
                 if result.scratch:
                     print("SCRATCH", flush=True)
-                    if mode == "background" and overlay_process is None:
-                        overlay_process = launch_stop_overlay()
-                        overlay_hand = result.active_hand
-                        hand_left_region_at = None
+                    if mode == "background":
+                        if menu_bar_controller is not None:
+                            if not menu_bar_controller.show_alert():
+                                raise RuntimeError("The menu-bar alert stopped responding.")
+                            overlay_hand = result.active_hand
+                            hand_left_region_at = None
+                        elif overlay_process is None:
+                            overlay_process = launch_stop_overlay()
+                            overlay_hand = result.active_hand
+                            hand_left_region_at = None
 
                 if mode == "test":
-                    draw_debug(frame, landmarks, result)
+                    draw_debug(frame, landmarks, result, pulse_result)
                     cv2.imshow(WINDOW_NAME, frame)
                     if cv2.waitKey(1) & 0xFF == ord("q"):
                         break
@@ -422,8 +513,8 @@ def run(mode: str = "test") -> None:
             close_overlay(overlay_process)
         camera.release()
         cv2.destroyAllWindows()
-        if background_controller is not None:
-            background_controller.close()
+        if menu_bar_controller is not None:
+            menu_bar_controller.close()
 
 
 if __name__ == "__main__":

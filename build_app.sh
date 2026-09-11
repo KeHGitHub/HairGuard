@@ -5,6 +5,7 @@ PROJECT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PYTHON="$PROJECT_DIR/.venv/bin/python"
 export PYINSTALLER_CONFIG_DIR="$PROJECT_DIR/build/pyinstaller-cache"
 export MPLCONFIGDIR="$PROJECT_DIR/build/matplotlib-cache"
+export CLANG_MODULE_CACHE_PATH="$PROJECT_DIR/build/swift-module-cache"
 
 if [ ! -x "$PYTHON" ]; then
     echo "Missing .venv. Follow the README setup steps first." >&2
@@ -16,17 +17,21 @@ if ! "$PYTHON" -c "import PyInstaller" 2>/dev/null; then
     exit 1
 fi
 
-# Build the small Tk overlay independently so showing STOP does not load a
-# second copy of MediaPipe, OpenCV, or the pose model.
-"$PYTHON" -m PyInstaller \
-    --noconfirm \
-    --clean \
-    --onefile \
-    --name HairGuardOverlay \
-    --distpath "$PROJECT_DIR/build/helper-dist" \
-    --workpath "$PROJECT_DIR/build/helper-work" \
-    --specpath "$PROJECT_DIR/build/helper-spec" \
-    "$PROJECT_DIR/overlay.py"
+if ! command -v swiftc >/dev/null 2>&1; then
+    echo "Missing swiftc. Install Apple's Command Line Tools first." >&2
+    exit 1
+fi
+
+# Build the native menu-bar icon, status popup, and red alert. It communicates
+# with the detector through two local pipes and has no runtime dependency.
+mkdir -p "$PROJECT_DIR/build/helper-dist" "$CLANG_MODULE_CACHE_PATH"
+swiftc \
+    -O \
+    -swift-version 5 \
+    -framework AppKit \
+    "$PROJECT_DIR/status_helper.swift" \
+    -o "$PROJECT_DIR/build/helper-dist/HairGuardStatus"
+codesign --force --sign - "$PROJECT_DIR/build/helper-dist/HairGuardStatus"
 
 "$PYTHON" -m PyInstaller \
     --noconfirm \

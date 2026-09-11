@@ -3,7 +3,7 @@ from importlib.util import find_spec
 
 
 project_root = Path(SPECPATH)
-overlay_helper = project_root / "build" / "helper-dist" / "HairGuardOverlay"
+status_helper = project_root / "build" / "helper-dist" / "HairGuardStatus"
 mediapipe_c_spec = find_spec("mediapipe.tasks.c")
 
 if mediapipe_c_spec is None or mediapipe_c_spec.origin is None:
@@ -11,16 +11,16 @@ if mediapipe_c_spec is None or mediapipe_c_spec.origin is None:
 
 mediapipe_c_library = Path(mediapipe_c_spec.origin).parent / "libmediapipe.dylib"
 
-if not overlay_helper.exists():
+if not status_helper.exists():
     raise SystemExit(
-        "Missing build/helper-dist/HairGuardOverlay. Run ./build_app.sh instead."
+        "Missing build/helper-dist/HairGuardStatus. Run ./build_app.sh instead."
     )
 
 a = Analysis(
     [str(project_root / "main.py")],
     pathex=[str(project_root)],
     binaries=[
-        (str(overlay_helper), "."),
+        (str(status_helper), "."),
         (str(mediapipe_c_library), "mediapipe/tasks/c"),
     ],
     datas=[(str(project_root / "pose_landmarker_lite.task"), ".")],
@@ -67,6 +67,7 @@ app = BUNDLE(
     bundle_identifier="com.hairguard.prototype",
     info_plist={
         "CFBundleDisplayName": "HairGuard",
+        "LSUIElement": True,
         "NSCameraUsageDescription": (
             "HairGuard uses the camera locally to detect hand-to-head scratching."
         ),
