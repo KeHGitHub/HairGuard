@@ -65,6 +65,54 @@ POINT_COLORS = {
 }
 
 
+class BackgroundController:
+    """Keep a macOS application menu responsive while detection is hidden."""
+
+    def __init__(self) -> None:
+        import tkinter as tk
+
+        self._tk = tk
+        self._quit_requested = False
+        self._root = tk.Tk(className="HairGuard")
+        self._root.title("HairGuard")
+        self._root.withdraw()
+
+        menu_bar = tk.Menu(self._root)
+        app_menu = tk.Menu(menu_bar, name="apple", tearoff=False)
+        app_menu.add_command(
+            label="Quit HairGuard",
+            accelerator="Command-Q",
+            command=self.request_quit,
+        )
+        menu_bar.add_cascade(label="HairGuard", menu=app_menu)
+        self._root.configure(menu=menu_bar)
+
+        self._root.bind_all("<Command-q>", self.request_quit)
+        self._root.createcommand("tk::mac::Quit", self.request_quit)
+        self._root.update_idletasks()
+        self._root.update()
+
+    def request_quit(self, _event: object = None) -> None:
+        self._quit_requested = True
+
+    def poll(self) -> bool:
+        """Process pending menu events and return False when quit is requested."""
+        if self._quit_requested:
+            return False
+        try:
+            self._root.update_idletasks()
+            self._root.update()
+        except self._tk.TclError:
+            self._quit_requested = True
+        return not self._quit_requested
+
+    def close(self) -> None:
+        try:
+            self._root.destroy()
+        except self._tk.TclError:
+            pass
+
+
 def open_camera() -> cv2.VideoCapture:
     """Open the built-in/default camera, preferring macOS AVFoundation."""
     camera = cv2.VideoCapture(0, cv2.CAP_AVFOUNDATION)
@@ -261,11 +309,15 @@ def close_overlay(process: subprocess.Popen) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Local hand-to-hair scratch detector")
+    default_mode = "background" if getattr(sys, "frozen", False) else "test"
     parser.add_argument(
         "--mode",
         choices=("test", "background"),
-        default="test",
-        help="test shows the debug preview; background hides it and shows STOP alerts",
+        default=default_mode,
+        help=(
+            "test shows the debug preview; background hides it and shows STOP alerts "
+            f"(default: {default_mode})"
+        ),
     )
     return parser.parse_args()
 
@@ -292,6 +344,11 @@ def run(mode: str = "test") -> None:
     overlay_process: Optional[subprocess.Popen] = None
     overlay_hand: Optional[str] = None
     hand_left_region_at: Optional[float] = None
+    background_controller = (
+        BackgroundController()
+        if mode == "background" and getattr(sys, "frozen", False)
+        else None
+    )
 
     if mode == "test":
         print("HairGuard test mode. Press q in the preview window to quit.", flush=True)
@@ -300,6 +357,9 @@ def run(mode: str = "test") -> None:
     try:
         with mp.tasks.vision.PoseLandmarker.create_from_options(options) as landmarker:
             while True:
+                if background_controller is not None and not background_controller.poll():
+                    break
+
                 if overlay_process is not None:
                     overlay_status = overlay_process.poll()
                     if overlay_status is not None:
@@ -362,6 +422,8 @@ def run(mode: str = "test") -> None:
             close_overlay(overlay_process)
         camera.release()
         cv2.destroyAllWindows()
+        if background_controller is not None:
+            background_controller.close()
 
 
 if __name__ == "__main__":

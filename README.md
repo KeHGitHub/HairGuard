@@ -121,8 +121,15 @@ dist/HairGuard.app       Double-clickable application
 dist/HairGuard.app.zip   Archive to send to friends
 ```
 
-Double-clicking `HairGuard.app` starts test mode, including the camera preview.
-Press `q` in the preview to quit.
+Double-clicking `HairGuard.app` starts background mode. It runs without a
+camera preview and displays the full-screen `STOP` warning when scratching is
+detected. The source command `python main.py` still defaults to test mode for
+development.
+
+The running app remains available from the Dock. To stop it, activate
+HairGuard and choose **HairGuard → Quit HairGuard**, press **Command-Q**, or
+choose **Quit** from its Dock menu. Quitting closes any active warning overlay
+and releases the camera cleanly.
 
 This beta uses a free ad-hoc signature rather than a paid Apple Developer ID.
 After unzipping it, another user may need to Control-click `HairGuard.app`,

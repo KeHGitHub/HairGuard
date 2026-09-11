@@ -4,6 +4,7 @@ set -eu
 PROJECT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PYTHON="$PROJECT_DIR/.venv/bin/python"
 export PYINSTALLER_CONFIG_DIR="$PROJECT_DIR/build/pyinstaller-cache"
+export MPLCONFIGDIR="$PROJECT_DIR/build/matplotlib-cache"
 
 if [ ! -x "$PYTHON" ]; then
     echo "Missing .venv. Follow the README setup steps first." >&2
