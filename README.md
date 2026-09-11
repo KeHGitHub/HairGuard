@@ -95,6 +95,41 @@ continue processing instead of freezing while the warning is visible.
 The process still runs in the terminal; “background” means the camera preview is
 hidden. HairGuard intentionally does not install a daemon or login item.
 
+## Build a macOS app
+
+The local beta can be packaged as a double-clickable Apple Silicon macOS app.
+The app contains Python, MediaPipe, OpenCV, the pose model, and a small compiled
+overlay helper. Your friends do not need Python and do not receive separate
+source files.
+
+Install the build tool once:
+
+```bash
+.venv/bin/python -m pip install -r requirements-build.txt
+```
+
+Then build:
+
+```bash
+./build_app.sh
+```
+
+The build produces:
+
+```text
+dist/HairGuard.app       Double-clickable application
+dist/HairGuard.app.zip   Archive to send to friends
+```
+
+Double-clicking `HairGuard.app` starts test mode, including the camera preview.
+Press `q` in the preview to quit.
+
+This beta uses a free ad-hoc signature rather than a paid Apple Developer ID.
+After unzipping it, another user may need to Control-click `HairGuard.app`,
+choose **Open**, and confirm **Open** on the first launch. They must also allow
+camera access when macOS asks. Build separate versions if Intel Mac support is
+needed; this configuration targets Apple Silicon (`arm64`).
+
 ## Detector states
 
 ```text
@@ -142,6 +177,9 @@ HairGuard/
 ├── scratch_detector.py           Portable scratching state machine
 ├── pose_landmarker_lite.task     Local MediaPipe pose model
 ├── requirements.txt              Pinned Python dependencies
+├── requirements-build.txt        App packaging dependency
+├── HairGuard.spec                macOS application bundle configuration
+├── build_app.sh                  Reproducible local app build
 └── README.md                     This guide
 ```
 

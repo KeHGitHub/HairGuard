@@ -16,10 +16,19 @@ import numpy as np
 from scratch_detector import DetectorResult, Landmark, ScratchDetector
 
 
+def bundled_path(filename: str) -> Path:
+    """Locate a resource in source runs or inside a PyInstaller bundle."""
+    bundle_root = getattr(sys, "_MEIPASS", None)
+    if bundle_root is not None:
+        return Path(bundle_root) / filename
+    return Path(__file__).resolve().with_name(filename)
+
+
 # Official MediaPipe lite model, stored locally so runtime inference is offline:
 # https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task
-MODEL_PATH = Path(__file__).with_name("pose_landmarker_lite.task")
-OVERLAY_PATH = Path(__file__).with_name("overlay.py")
+MODEL_PATH = bundled_path("pose_landmarker_lite.task")
+OVERLAY_PATH = bundled_path("overlay.py")
+OVERLAY_HELPER_PATH = bundled_path("HairGuardOverlay")
 WINDOW_NAME = "HairGuard - press q to quit"
 OVERLAY_EXIT_GRACE_SECONDS = 0.25
 
@@ -224,10 +233,16 @@ def draw_debug(
 
 def launch_stop_overlay() -> subprocess.Popen:
     """Start the overlay separately so its event loop cannot pause detection."""
-    if not OVERLAY_PATH.exists():
-        raise RuntimeError(f"Missing overlay helper: {OVERLAY_PATH}")
+    if getattr(sys, "frozen", False):
+        if not OVERLAY_HELPER_PATH.exists():
+            raise RuntimeError(f"Missing overlay helper: {OVERLAY_HELPER_PATH}")
+        command = [str(OVERLAY_HELPER_PATH)]
+    else:
+        if not OVERLAY_PATH.exists():
+            raise RuntimeError(f"Missing overlay helper: {OVERLAY_PATH}")
+        command = [sys.executable, str(OVERLAY_PATH)]
     try:
-        return subprocess.Popen([sys.executable, str(OVERLAY_PATH)])
+        return subprocess.Popen(command)
     except OSError as error:
         raise RuntimeError(f"Could not launch the STOP overlay: {error}") from error
 
